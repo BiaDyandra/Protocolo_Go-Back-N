@@ -1,0 +1,293 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Emissor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">gbn-udp</a> &gt; <a href="index.source.html" class="el_package">gbn</a> &gt; <span class="el_source">Emissor.java</span></div><h1>Emissor.java</h1><pre class="source lang-java linenums">package gbn;
+
+import java.io.File;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.nio.file.Files;
+import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.Timer;
+import java.util.TimerTask;
+
+/**
+ * Emissor GBN.
+ *
+ * Uso:
+ *   java gbn.Emissor &lt;arquivo_origem&gt; &lt;IP_destino&gt;:&lt;path_destino&gt; &lt;tamanho_janela&gt; &lt;prob_perda&gt; [porta]
+ *
+ * Exemplo:
+ *   java gbn.Emissor /home/alice/foto.jpg 192.168.0.10:/tmp/foto_recebida.jpg 8 0.10
+ *
+ * Suposição assumida (documentada no README): a porta do Receptor é fixa
+ * (padrão 5000), podendo ser sobrescrita por um 5º argumento opcional, já
+ * que o enunciado não especifica como a porta é passada ao Emissor.
+ */
+<span class="nc" id="L28">public class Emissor {</span>
+
+    // Porta padrão do receptor quando não especificada na linha de comando
+    private static final int PORTA_PADRAO = 5000;
+
+    // Tempo máximo de espera por um ACK antes de retransmitir toda a janela (em ms)
+    private static final long TIMEOUT_MS = 500;
+
+    // Estado compartilhado entre a thread de envio e a thread de recepção de ACKs
+<span class="nc" id="L37">    private final Object lock = new Object();</span>
+
+    // base: índice do pacote mais antigo ainda não confirmado (início da janela)
+<span class="nc" id="L40">    private int base = 0;</span>
+
+    // nextSeqNum: índice do próximo pacote a ser enviado (fim da janela)
+<span class="nc" id="L43">    private int nextSeqNum = 0;</span>
+
+    private List&lt;byte[]&gt; segmentos;    // Lista de todos os segmentos do arquivo a transmitir
+    private DatagramSocket socket;     // Socket UDP usado para envio e recepção
+    private InetAddress receptorAddr;  // Endereço IP do receptor
+    private int receptorPort;          // Porta UDP do receptor
+    private Timer timer;               // Timer único associado ao pacote mais antigo sem ACK
+
+    // Contadores para as estatísticas exibidas ao final da transferência
+<span class="nc" id="L52">    private int pacotesEnviados = 0;</span>
+<span class="nc" id="L53">    private int retransmissoes = 0;</span>
+<span class="nc" id="L54">    private int acksRecebidos = 0;</span>
+
+    // Flag volátil lida pela thread de ACKs para saber quando encerrar
+<span class="nc" id="L57">    private volatile boolean finalizado = false;</span>
+
+    public static void main(String[] args) throws Exception {
+        // Valida o número mínimo de argumentos obrigatórios
+<span class="nc bnc" id="L61" title="All 2 branches missed.">        if (args.length &lt; 4) {</span>
+<span class="nc" id="L62">            System.err.println(&quot;Uso: java gbn.Emissor &lt;arquivo_origem&gt; &lt;IP_destino&gt;:&lt;path_destino&gt; &quot;</span>
+                    + &quot;&lt;tamanho_janela&gt; &lt;prob_perda&gt; [porta]&quot;);
+<span class="nc" id="L64">            System.exit(1);</span>
+        }
+
+<span class="nc" id="L67">        String arquivoOrigem = args[0];</span>
+
+        // Separa o IP do path de destino usando &quot;:&quot; como delimitador (limite 2 partes)
+<span class="nc" id="L70">        String[] destino = args[1].split(&quot;:&quot;, 2);</span>
+<span class="nc bnc" id="L71" title="All 2 branches missed.">        if (destino.length != 2) {</span>
+<span class="nc" id="L72">            System.err.println(&quot;Formato inválido para destino. Use IP_destino:path_destino&quot;);</span>
+<span class="nc" id="L73">            System.exit(1);</span>
+        }
+<span class="nc" id="L75">        String ipDestino = destino[0];</span>
+<span class="nc" id="L76">        String pathDestino = destino[1];</span>
+<span class="nc" id="L77">        int windowSize = Integer.parseInt(args[2]);</span>
+<span class="nc" id="L78">        double probPerda = Double.parseDouble(args[3]);</span>
+
+        // Porta é opcional; usa o padrão se não fornecida
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        int porta = args.length &gt;= 5 ? Integer.parseInt(args[4]) : PORTA_PADRAO;</span>
+
+<span class="nc" id="L83">        new Emissor().run(arquivoOrigem, ipDestino, pathDestino, windowSize, probPerda, porta);</span>
+<span class="nc" id="L84">    }</span>
+
+    public void run(String arquivoOrigem, String ipDestino, String pathDestino,
+                    int windowSize, double probPerda, int porta) throws Exception {
+
+        // Lê todo o conteúdo do arquivo de uma vez e divide em segmentos de MAX_PAYLOAD bytes
+<span class="nc" id="L90">        byte[] conteudo = Files.readAllBytes(new File(arquivoOrigem).toPath());</span>
+<span class="nc" id="L91">        segmentos = dividirEmSegmentos(conteudo, Packet.MAX_PAYLOAD);</span>
+
+        // Abre um socket UDP em uma porta aleatória disponível (o SO escolhe automaticamente)
+<span class="nc" id="L94">        socket = new DatagramSocket();</span>
+<span class="nc" id="L95">        receptorAddr = InetAddress.getByName(ipDestino);</span>
+<span class="nc" id="L96">        receptorPort = porta;</span>
+<span class="nc" id="L97">        timer = new Timer(true); // Timer em modo daemon: não impede o encerramento da JVM</span>
+
+<span class="nc" id="L99">        System.out.println(&quot;[Emissor] Arquivo: &quot; + arquivoOrigem + &quot; (&quot; + conteudo.length + &quot; bytes, &quot;</span>
+<span class="nc" id="L100">                + segmentos.size() + &quot; segmentos)&quot;);</span>
+<span class="nc" id="L101">        System.out.println(&quot;[Emissor] Destino: &quot; + ipDestino + &quot;:&quot; + porta + &quot; -&gt; &quot; + pathDestino);</span>
+<span class="nc" id="L102">        System.out.println(&quot;[Emissor] Janela N=&quot; + windowSize + &quot; | probPerda=&quot; + probPerda);</span>
+
+        // 1) Handshake
+        // Calcula o MD5 do arquivo original para permitir a verificação de integridade pelo Receptor
+<span class="nc" id="L106">        String md5Origem = calcularMD5(conteudo);</span>
+<span class="nc" id="L107">        System.out.println(&quot;[Emissor] MD5 do arquivo original: &quot; + md5Origem);</span>
+
+        // Envia ao receptor o caminho de destino, o tamanho do arquivo, a probabilidade de perda
+        // e o hash MD5 do conteúdo original (para verificação de integridade fim-a-fim)
+<span class="nc" id="L111">        String payload = pathDestino + &quot;|&quot; + conteudo.length + &quot;|&quot; + probPerda + &quot;|&quot; + md5Origem;</span>
+<span class="nc" id="L112">        enviarPacote(Packet.handshake(payload));</span>
+
+        // Marca o início da transferência para calcular o throughput ao final
+<span class="nc" id="L115">        long inicio = System.currentTimeMillis();</span>
+
+        // 2) Thread que escuta ACKs
+        // Roda em paralelo ao loop de envio para processar confirmações sem bloquear a janela
+<span class="nc" id="L119">        Thread ackListener = new Thread(() -&gt; escutarAcks(windowSize));</span>
+<span class="nc" id="L120">        ackListener.start();</span>
+
+        // 3) Loop principal: envia enquanto houver espaço na janela
+        // O monitor &quot;lock&quot; sincroniza o acesso às variáveis base e nextSeqNum com a thread de ACKs
+<span class="nc" id="L124">        synchronized (lock) {</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">            while (base &lt; segmentos.size()) {</span>
+                // Preenche a janela: envia todos os segmentos disponíveis dentro do limite N
+<span class="nc bnc" id="L127" title="All 4 branches missed.">                while (nextSeqNum &lt; base + windowSize &amp;&amp; nextSeqNum &lt; segmentos.size()) {</span>
+<span class="nc" id="L128">                    enviarSegmento(nextSeqNum);</span>
+                    // Inicia o timer apenas ao enviar o primeiro pacote da janela (o mais antigo)
+<span class="nc bnc" id="L130" title="All 2 branches missed.">                    if (base == nextSeqNum) {</span>
+<span class="nc" id="L131">                        reiniciarTimer(windowSize);</span>
+                    }
+<span class="nc" id="L133">                    nextSeqNum++;</span>
+                }
+                // Bloqueia até que um ACK seja recebido e a thread de ACKs chame notifyAll()
+<span class="nc" id="L136">                lock.wait();</span>
+            }
+<span class="nc" id="L138">        }</span>
+
+        // Sinaliza para a thread de ACKs que a transferência terminou
+<span class="nc" id="L141">        finalizado = true;</span>
+<span class="nc" id="L142">        timer.cancel();</span>
+<span class="nc" id="L143">        ackListener.interrupt();</span>
+
+        // 4) Encerramento
+        // Envia o pacote FIN para que o receptor saiba que não há mais segmentos
+<span class="nc" id="L147">        enviarPacote(Packet.fin(segmentos.size()));</span>
+
+        // Calcula e exibe as estatísticas finais da transferência
+<span class="nc" id="L150">        long duracaoMs = System.currentTimeMillis() - inicio;</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">        double throughputKBs = duracaoMs == 0 ? 0 : (conteudo.length / 1024.0) / (duracaoMs / 1000.0);</span>
+
+<span class="nc" id="L153">        System.out.println(&quot;\n[Emissor] Transferência concluída em &quot; + duracaoMs + &quot; ms.&quot;);</span>
+<span class="nc" id="L154">        System.out.println(&quot;[Emissor] Pacotes enviados (incluindo retransmissões): &quot; + pacotesEnviados);</span>
+<span class="nc" id="L155">        System.out.println(&quot;[Emissor] Retransmissões: &quot; + retransmissoes);</span>
+<span class="nc" id="L156">        System.out.println(&quot;[Emissor] ACKs recebidos: &quot; + acksRecebidos);</span>
+<span class="nc" id="L157">        System.out.printf(&quot;[Emissor] Throughput estimado: %.2f KB/s%n&quot;, throughputKBs);</span>
+
+<span class="nc" id="L159">        socket.close();</span>
+<span class="nc" id="L160">    }</span>
+
+    /**
+     * Thread dedicada à recepção de ACKs.
+     * Roda em loop até que &quot;finalizado&quot; seja verdadeiro, processando cada ACK recebido:
+     * avança a base da janela e notifica o loop principal para continuar o envio.
+     */
+    private void escutarAcks(int windowSize) {
+<span class="nc" id="L168">        byte[] buf = new byte[Packet.HEADER_SIZE + Packet.MAX_PAYLOAD];</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">        while (!finalizado) {</span>
+            try {
+<span class="nc" id="L171">                DatagramPacket udpPacket = new DatagramPacket(buf, buf.length);</span>
+<span class="nc" id="L172">                socket.receive(udpPacket);</span>
+<span class="nc" id="L173">                Packet p = Packet.deserialize(udpPacket.getData(), udpPacket.getLength());</span>
+
+                // Ignora qualquer pacote que não seja ACK
+<span class="nc bnc" id="L176" title="All 2 branches missed.">                if (p.tipo != Packet.TIPO_ACK) {</span>
+<span class="nc" id="L177">                    continue;</span>
+                }
+
+                // Atualiza o estado da janela dentro do bloco sincronizado
+<span class="nc" id="L181">                synchronized (lock) {</span>
+<span class="nc" id="L182">                    acksRecebidos++;</span>
+
+                    // ACK cumulativo: confirma todos os segmentos até p.numAck inclusive
+<span class="nc bnc" id="L185" title="All 2 branches missed.">                    if (p.numAck &gt;= base) {</span>
+<span class="nc" id="L186">                        base = p.numAck + 1; // Avança a base da janela</span>
+
+<span class="nc bnc" id="L188" title="All 2 branches missed.">                        if (base == nextSeqNum) {</span>
+                            // Todos os pacotes enviados foram confirmados: cancela o timer
+<span class="nc" id="L190">                            timer.cancel();</span>
+<span class="nc" id="L191">                            timer = new Timer(true);</span>
+                        } else {
+                            // Ainda há pacotes sem ACK: reinicia o timer para o mais antigo
+<span class="nc" id="L194">                            reiniciarTimer(windowSize);</span>
+                        }
+
+                        // Notifica o loop principal que há espaço na janela para novos envios
+<span class="nc" id="L198">                        lock.notifyAll();</span>
+                    }
+<span class="nc" id="L200">                }</span>
+<span class="nc" id="L201">            } catch (Exception e) {</span>
+                // Exceção esperada quando o socket é fechado ao término da transferência
+<span class="nc bnc" id="L203" title="All 2 branches missed.">                if (!finalizado) {</span>
+<span class="nc" id="L204">                    System.err.println(&quot;[Emissor] Erro ao receber ACK: &quot; + e.getMessage());</span>
+                }
+<span class="nc" id="L206">            }</span>
+        }
+<span class="nc" id="L208">    }</span>
+
+    /**
+     * Cancela o timer atual e agenda um novo com o mesmo timeout.
+     * Chamado sempre que a base da janela avança ou um novo segmento é enviado como o mais antigo.
+     */
+    private void reiniciarTimer(int windowSize) {
+<span class="nc" id="L215">        timer.cancel();</span>
+<span class="nc" id="L216">        timer = new Timer(true);</span>
+<span class="nc" id="L217">        timer.schedule(new TimerTask() {</span>
+            @Override
+            public void run() {
+<span class="nc" id="L220">                onTimeout(windowSize);</span>
+<span class="nc" id="L221">            }</span>
+        }, TIMEOUT_MS);
+<span class="nc" id="L223">    }</span>
+
+    /**
+     * Callback acionado quando o timer expira (timeout do GBN).
+     * Retransmite todos os pacotes da janela atual (de base até nextSeqNum-1) e reinicia o timer.
+     */
+    private void onTimeout(int windowSize) {
+<span class="nc" id="L230">        synchronized (lock) {</span>
+<span class="nc bnc" id="L231" title="All 2 branches missed.">            if (finalizado) return;</span>
+<span class="nc" id="L232">            System.out.println(&quot;[Emissor] Timeout! Retransmitindo pacotes &quot; + base + &quot; até &quot; + (nextSeqNum - 1));</span>
+            // Retransmite toda a janela, conforme exige a FSM do emissor GBN
+<span class="nc bnc" id="L234" title="All 2 branches missed.">            for (int seq = base; seq &lt; nextSeqNum; seq++) {</span>
+<span class="nc" id="L235">                enviarSegmento(seq);</span>
+<span class="nc" id="L236">                retransmissoes++;</span>
+            }
+<span class="nc" id="L238">            reiniciarTimer(windowSize);</span>
+<span class="nc" id="L239">        }</span>
+<span class="nc" id="L240">    }</span>
+
+    /**
+     * Constrói um pacote DATA com o segmento de índice seq e o envia.
+     */
+    private void enviarSegmento(int seq) {
+<span class="nc" id="L246">        Packet p = Packet.data(seq, segmentos.get(seq));</span>
+<span class="nc" id="L247">        enviarPacote(p);</span>
+<span class="nc" id="L248">        pacotesEnviados++;</span>
+<span class="nc" id="L249">    }</span>
+
+    /**
+     * Serializa um pacote e o envia via UDP ao receptor.
+     */
+    private void enviarPacote(Packet p) {
+        try {
+<span class="nc" id="L256">            byte[] raw = p.serialize();</span>
+<span class="nc" id="L257">            socket.send(new DatagramPacket(raw, raw.length, receptorAddr, receptorPort));</span>
+<span class="nc" id="L258">        } catch (Exception e) {</span>
+<span class="nc" id="L259">            System.err.println(&quot;[Emissor] Erro ao enviar pacote: &quot; + e.getMessage());</span>
+<span class="nc" id="L260">        }</span>
+<span class="nc" id="L261">    }</span>
+
+    /**
+     * Calcula o hash MD5 do conteúdo do arquivo original, em formato hexadecimal.
+     * Usado para verificação de integridade fim-a-fim: o Receptor recalcula o MD5
+     * do arquivo gravado e compara com este valor, enviado no HANDSHAKE.
+     */
+    private static String calcularMD5(byte[] conteudo) throws Exception {
+<span class="nc" id="L269">        MessageDigest md = MessageDigest.getInstance(&quot;MD5&quot;);</span>
+<span class="nc" id="L270">        byte[] hash = md.digest(conteudo);</span>
+<span class="nc" id="L271">        return HexFormat.of().formatHex(hash);</span>
+    }
+
+    /**
+     * Divide o conteúdo do arquivo em segmentos de no máximo tamanhoMax bytes.
+     * O último segmento pode ser menor que tamanhoMax se o arquivo não for múltiplo exato.
+     * Se o arquivo estiver vazio, retorna uma lista com um segmento vazio para manter o fluxo do protocolo.
+     */
+    static List&lt;byte[]&gt; dividirEmSegmentos(byte[] conteudo, int tamanhoMax) {
+<span class="fc" id="L280">        List&lt;byte[]&gt; segmentos = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L281" title="All 2 branches covered.">        for (int offset = 0; offset &lt; conteudo.length; offset += tamanhoMax) {</span>
+<span class="fc" id="L282">            int fim = Math.min(offset + tamanhoMax, conteudo.length);</span>
+<span class="fc" id="L283">            byte[] segmento = new byte[fim - offset];</span>
+<span class="fc" id="L284">            System.arraycopy(conteudo, offset, segmento, 0, segmento.length);</span>
+<span class="fc" id="L285">            segmentos.add(segmento);</span>
+        }
+<span class="fc bfc" id="L287" title="All 2 branches covered.">        if (segmentos.isEmpty()) {</span>
+<span class="fc" id="L288">            segmentos.add(new byte[0]); // arquivo vazio ainda gera 1 segmento</span>
+        }
+<span class="fc" id="L290">        return segmentos;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.12.202403310830</span></div></body></html>
