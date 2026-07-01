@@ -24,10 +24,10 @@ Implementação do protocolo de transferência confiável **Go-Back-N (GBN)** em
     │   │       └── EmissorTest.java -> Testes unitários de segmentação de arquivo
     │   ├── pom.xml                  -> Maven: dependências (JUnit 5) e plug-in JaCoCo
     │   ├── Dockerfile               -> Build multi-stage para execução em container isolado
-    |   └── .gitignore               
+    |   └── .gitignore               -> Ignora a pasta target/ gerada pelo build do Maven   
     ├── LICENSE
     ├── README
-    └── Relatorio.pdf
+    └── Relatorio-Tecnico.pdf
 
 ---
 
@@ -37,6 +37,7 @@ Implementação do protocolo de transferência confiável **Go-Back-N (GBN)** em
 2. **Parametrização da Porta de Destino:** Visto que o enunciado sugere o formato estático `IP_destino:path_destino`, convencionou-se o uso da porta UDP padrão **5000** para escuta do Receptor. Caso necessário, o Emissor aceita opcionalmente um 5º argumento em linha de comando para sobrescrever esse valor.
 3. **Mecanismo Multithreading no Emissor:** Para viabilizar o envio em lote sem bloqueio por ACKs individuais, o Emissor gerencia duas threads concorrentes sincronizadas por exclusão mútua (`synchronized`): uma thread de envio associada à janela ativa e uma thread monitora dedicada exclusivamente à captura de ACKs no socket.
 4. **Verificação de Integridade via MD5 fim-a-fim:** O Emissor calcula o hash MD5 (`java.security.MessageDigest`) do arquivo original antes da transmissão e o envia embutido no payload do pacote HANDSHAKE (formato `path|tamanho|probPerda|md5Origem`). O Receptor recalcula o MD5 de forma incremental (`digest.update()`) a cada segmento gravado com sucesso e, ao final da transferência, compara o hash resultante com o `md5Origem` recebido, reportando `OK` ou `FALHA` no console — sem precisar reler o arquivo do disco.
+5. **Progresso em Tempo Real:** Além do timer único de retransmissão, o Emissor mantém um segundo `Timer` daemon (`progressoTimer`) que imprime, a cada 500 ms, o percentual de segmentos confirmados, o total de pacotes enviados, ACKs recebidos, retransmissões e o throughput parcial — sem interferir na FSM de envio. A leitura das variáveis compartilhadas (`base`, contadores) é protegida pelo mesmo monitor (`synchronized(lock)`) usado pela thread de ACKs, evitando condição de corrida.
 
 ---
 
@@ -104,7 +105,13 @@ java -cp target/gbn-udp.jar gbn.Emissor teste.bin 127.0.0.1:C:recebido.bin 8 0.0
 java -cp target/gbn-udp.jar gbn.Emissor teste.bin 127.0.0.1:C:recebido_N4.bin 4 0.10
 ```
 
-Você verá mensagens de `Timeout! Retransmitindo...` no terminal do Emissor — isso é o GBN funcionando corretamente. Ao final, ambos os terminais exibem estatísticas de pacotes enviados, retransmissões, ACKs recebidos e taxa de perda efetiva.
+Você verá mensagens de `Timeout! Retransmitindo...` no terminal do Emissor — isso é o GBN funcionando corretamente. Além disso, a cada 500 ms o Emissor imprime uma linha de progresso em tempo real:
+
+```
+[Emissor] Progresso: 34.2% (700/2048 segmentos confirmados) | enviados=812 | acks=700 | retransmissões=112 | throughput≈18.40 KB/s
+```
+
+Ao final, ambos os terminais exibem estatísticas de pacotes enviados, retransmissões, ACKs recebidos e taxa de perda efetiva.
 
 ### Passo 5: Verificar integridade
 
