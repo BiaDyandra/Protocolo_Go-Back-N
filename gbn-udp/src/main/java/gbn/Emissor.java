@@ -33,6 +33,9 @@ public class Emissor {
     // Tempo máximo de espera por um ACK antes de retransmitir toda a janela (em ms)
     private static final long TIMEOUT_MS = 500;
 
+    // Intervalo entre impressões de progresso em tempo real durante a transferência (em ms)
+    private static final long PROGRESSO_INTERVALO_MS = 500;
+
     // Estado compartilhado entre a thread de envio e a thread de recepção de ACKs
     private final Object lock = new Object();
 
@@ -47,6 +50,8 @@ public class Emissor {
     private InetAddress receptorAddr;  // Endereço IP do receptor
     private int receptorPort;          // Porta UDP do receptor
     private Timer timer;               // Timer único associado ao pacote mais antigo sem ACK
+    private Timer progressoTimer;      // Timer periódico dedicado a imprimir o progresso em tempo real
+    private long inicio;               // Timestamp de início da transferência (para throughput acumulado)
 
     // Contadores para as estatísticas exibidas ao final da transferência
     private int pacotesEnviados = 0;
@@ -112,12 +117,23 @@ public class Emissor {
         enviarPacote(Packet.handshake(payload));
 
         // Marca o início da transferência para calcular o throughput ao final
-        long inicio = System.currentTimeMillis();
+        inicio = System.currentTimeMillis();
 
         // 2) Thread que escuta ACKs
         // Roda em paralelo ao loop de envio para processar confirmações sem bloquear a janela
         Thread ackListener = new Thread(() -> escutarAcks(windowSize));
         ackListener.start();
+
+        // 2.1) Timer periódico de progresso em tempo real (R: "exibir progresso em tempo real")
+        // Roda em paralelo, imprimindo o estado atual da janela e as estatísticas parciais
+        // a cada PROGRESSO_INTERVALO_MS, sem interferir na lógica de envio/retransmissão.
+        progressoTimer = new Timer(true);
+        progressoTimer.scheduleAtFixedRate(new TimerTask() {
+            @Override
+            public void run() {
+                imprimirProgresso();
+            }
+        }, PROGRESSO_INTERVALO_MS, PROGRESSO_INTERVALO_MS);
 
         // 3) Loop principal: envia enquanto houver espaço na janela
         // O monitor "lock" sincroniza o acesso às variáveis base e nextSeqNum com a thread de ACKs
@@ -140,6 +156,7 @@ public class Emissor {
         // Sinaliza para a thread de ACKs que a transferência terminou
         finalizado = true;
         timer.cancel();
+        progressoTimer.cancel();
         ackListener.interrupt();
 
         // 4) Encerramento
@@ -237,6 +254,36 @@ public class Emissor {
             }
             reiniciarTimer(windowSize);
         }
+    }
+
+    /**
+     * Imprime uma linha de progresso em tempo real com o estado atual da transferência:
+     * pacotes enviados, ACKs recebidos, retransmissões e throughput estimado até o momento.
+     * Chamado periodicamente pelo progressoTimer enquanto a transferência está em andamento.
+     */
+    private void imprimirProgresso() {
+        int enviados, acks, retrans, baseAtual, total;
+        synchronized (lock) {
+            // Nada a reportar ainda (janela pode estar vazia logo após o handshake)
+            if (finalizado) {
+                return;
+            }
+            enviados = pacotesEnviados;
+            acks = acksRecebidos;
+            retrans = retransmissoes;
+            baseAtual = base;
+            total = segmentos.size();
+        }
+
+        long decorridoMs = System.currentTimeMillis() - inicio;
+        double bytesConfirmados = (double) baseAtual * Packet.MAX_PAYLOAD;
+        double throughputKBs = decorridoMs == 0 ? 0 : (bytesConfirmados / 1024.0) / (decorridoMs / 1000.0);
+        double percentualConcluido = total == 0 ? 0 : (100.0 * baseAtual / total);
+
+        System.out.printf(
+                "[Emissor] Progresso: %.1f%% (%d/%d segmentos confirmados) | enviados=%d | acks=%d | "
+                        + "retransmissões=%d | throughput≈%.2f KB/s%n",
+                percentualConcluido, baseAtual, total, enviados, acks, retrans, throughputKBs);
     }
 
     /**
