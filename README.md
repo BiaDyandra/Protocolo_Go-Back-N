@@ -24,8 +24,8 @@ Implementação do protocolo de transferência confiável **Go-Back-N (GBN)** em
     │   │       └── EmissorTest.java -> Testes unitários de segmentação de arquivo
     │   ├── pom.xml                  -> Maven: dependências (JUnit 5) e plug-in JaCoCo
     │   └── Dockerfile               -> Build multi-stage para execução em container isolado
-    └── LICENSE
-    └── README
+    ├── LICENSE
+    ├── README
     └── Relatorio.pdf
 
 ---
