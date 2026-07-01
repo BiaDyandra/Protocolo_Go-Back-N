@@ -156,3 +156,4 @@ O repositório conta com quatro pipelines em `.github/workflows/`. A cada `push`
 - **Instituição:** Universidade Federal de Alfenas (UNIFAL-MG)
 - **Disciplina:** Redes de Computadores
 - **Docente:** Prof. Flavio Barbieri Gonzaga
+- **Discente:** Bianca Dyandra Ribeiro Gomes de Farias
